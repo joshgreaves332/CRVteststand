@@ -308,7 +308,12 @@ datatag = { #updated to 1420. #FIXME: tag previous runs
               "type":"led", 
               "config":"crvaging-016",
               "run#":[2052, 2053, 2054, 2055, 2056],
-              "bulk":[-25, 0, +25, +50, +75]}
+              "bulk":[-25, 0, +25, +50, +75]},
+            "muontagger_calibration_1": {
+              "type":"led", 
+              "config":"crvaging-021",
+              "run#":[2158, 2159, 2160, 2161, 2162, 2163],
+              "bulk":[-25, 0, +25, +50, +75, +100]}
 }
 
 # temperature scan data tags, exist for compatibility reasons

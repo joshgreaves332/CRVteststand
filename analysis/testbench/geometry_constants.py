@@ -226,6 +226,19 @@ geom_dict_crvaging016 = {
     'canvasSize'    : (16,5)
 }
 
+geom_dict_crvaging021 = {
+    'tag'           : 'config_021_CRV_T_A/B',
+    'module'        : ['CRV_T_A_HORSTD'],
+    'moduleOffsetX' : [0.],
+    'moduleOffsetY' : [0.],
+    'FEB'           : [[0,-1]],
+    'nFEB'          : 1,
+    'badChannels'   : [],
+    'triggerOnlyChs': [],
+                      # 2-tuple list if channels are designated in the triggering layers 
+    'canvasSize'    : (16,5)
+}
+
 geom_dict_crvled001 = {
     'tag'           : 'config_LED001_CRV_L_A',
     'module'        : ['CRV_L_A_HORSTD'],
@@ -299,6 +312,7 @@ setup_dict = {'crvaging-001': [geom_dict_crvaging001],
               'crvaging-010': [geom_dict_crvaging010],
               'crvaging-011': [geom_dict_crvaging011],
               'crvaging-016': [geom_dict_crvaging016],
+              'crvaging-021': [geom_dict_crvaging021],
               'crvled-001'  : [geom_dict_crvled001],
               'crvled-002'  : [geom_dict_crvled002],
               'crvled-003'  : [geom_dict_crvled003],
