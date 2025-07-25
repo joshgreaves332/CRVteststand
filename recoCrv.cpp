@@ -40,6 +40,7 @@ const int BOARD_STATUS_REGISTERS=22;
 const int FPGA_BLOCK_REGISTERS=38;
 const int FPGA_BLOCKS=4;
 const float DEFAULT_BETA=16.0;
+const float COUNTER_WIDTH=51.34; //mm
 
 struct TemperatureCorrections
 {
@@ -52,7 +53,16 @@ struct TemperatureCorrections
   double referenceTemperatureFEB{40.0};   //degC
 };
 
-typedef std::map<std::pair<int,std::pair<int,int> >, std::pair<int,std::pair<float,float> > >  ChannelMapType;   //feb,(channel1,channel2) --> side,(x,y)
+struct ChannelStruct
+{
+  int _side;
+  int _sector;
+  float _x,_y;
+  int _ignoreForFit;
+  ChannelStruct() : _side(0), _sector(0), _x(0), _y(0), _ignoreForFit(0) {}
+  ChannelStruct(int side, int sector, float x, float y, int ignoreForFit) : _side(side), _sector(sector), _x(x), _y(y), _ignoreForFit(ignoreForFit) {}
+};
+typedef std::map<std::pair<int,std::pair<int,int> >, ChannelStruct>  ChannelMapType;   //feb,(channel1,channel2) --> channelStruct
 
 class Calibration
 {
@@ -319,7 +329,8 @@ class CrvEvent
 {
   public:
   CrvEvent(const std::string &runNumber, const int numberOfFebs, const int channelsPerFeb, const int numberOfSamples,
-           TTree *tree, TTree *recoTree, const TemperatureCorrections &temperatureCorrections, float PEcut);
+           TTree *tree, TTree *recoTree, const TemperatureCorrections &temperatureCorrections, float PEcut,
+           const std::string &channelMapFile);
   void     Reconstruct(int entry, const Calibration &calib);
   TCanvas *GetCanvas(int feb, int channel) {return _canvas[feb*_channelsPerFeb+channel];}
   TH1F    *GetHistPEs(int i, int feb, int channel)
@@ -391,17 +402,19 @@ class CrvEvent
   std::vector<TGraph*>  _histTemperatures;
   std::vector<TGraph*>  _histTemperaturesFEB;
 
-  //for track fits
+  //for track fits (arrays are sorted by sectors; entry 0 is used for all sectors)
   ChannelMapType _channelMap;
-  float _PEcut;
-  float _trackSlope;      //using slope=dx/dy to avoid inf for vertical tracks
-  float _trackIntercept;  //x value, where y=0
-  float _trackChi2;
-  int   _trackPoints;
-  float _trackPEs;
+  int    _numberOfSectors;
+  float  _PEcut;
+  float *_trackSlope;      //using slope=dx/dy to avoid inf for vertical tracks
+  float *_trackIntercept;  //x value, where y=0
+  float *_trackChi2;
+  int   *_trackPoints;
+  float *_trackPEs;
 };
 CrvEvent::CrvEvent(const std::string &runNumber, const int numberOfFebs, const int channelsPerFeb, const int numberOfSamples,
-                   TTree *tree, TTree *recoTree, const TemperatureCorrections &temperatureCorrections, float PEcut) :
+                   TTree *tree, TTree *recoTree, const TemperatureCorrections &temperatureCorrections, float PEcut,
+                   const std::string &channelMapFile) :
                    _runNumber(runNumber), _numberOfFebs(numberOfFebs), _channelsPerFeb(channelsPerFeb), _numberOfSamples(numberOfSamples),
                    _tree(tree), _recoTree(recoTree), _tc(temperatureCorrections), _PEcut(PEcut)
 {
@@ -415,6 +428,7 @@ CrvEvent::CrvEvent(const std::string &runNumber, const int numberOfFebs, const i
     if(configKey=="signalRegionStart") _signalRegionStart=atoi(configValue.c_str());
     if(configKey=="signalRegionEnd")   _signalRegionEnd=atoi(configValue.c_str());
   }
+  configFile.close();
 
   _lastSpillIndex = new int[_numberOfFebs*_channelsPerFeb];
 //  _tdcSinceSpill  = new int[_numberOfFebs];  //OLD
@@ -461,6 +475,14 @@ CrvEvent::CrvEvent(const std::string &runNumber, const int numberOfFebs, const i
   _recoStartBinReflectedPulse            = new int[_numberOfFebs*_channelsPerFeb];
   _recoEndBinReflectedPulse              = new int[_numberOfFebs*_channelsPerFeb];
 
+  _numberOfSectors=0;
+  if(channelMapFile!="") ReadChannelMap(channelMapFile);
+  _trackSlope     = new float[_numberOfSectors+1];
+  _trackIntercept = new float[_numberOfSectors+1];
+  _trackChi2      = new float[_numberOfSectors+1];
+  _trackPoints    = new int[_numberOfSectors+1];
+  _trackPEs       = new float[_numberOfSectors+1];
+
   recoTree->Branch("runNumber", &_run, "runNumber/I");
   recoTree->Branch("subrunNumber", &_subrun, "subrunNumber/I");
   recoTree->Branch("spillIndex", &_spillIndex, "spillIndex/I");
@@ -492,11 +514,11 @@ CrvEvent::CrvEvent(const std::string &runNumber, const int numberOfFebs, const i
   recoTree->Branch("LEtimeReflectedPulse", _LEtimeReflectedPulse, Form("LEtimeReflectedPulse[%i][%i]/F",_numberOfFebs,_channelsPerFeb));
   recoTree->Branch("recoStartBinReflectedPulse", _recoStartBinReflectedPulse, Form("recoStartBinReflectedPulse[%i][%i]/I",_numberOfFebs,_channelsPerFeb));
   recoTree->Branch("recoEndBinReflectedPulse", _recoEndBinReflectedPulse, Form("recoEndBinReflectedPulse[%i][%i]/I",_numberOfFebs,_channelsPerFeb));
-  recoTree->Branch("trackSlope", &_trackSlope, "trackSlope/F");
-  recoTree->Branch("trackIntercept", &_trackIntercept, "trackIntercept/F");
-  recoTree->Branch("trackChi2", &_trackChi2, "trackChi2/F");
-  recoTree->Branch("trackPoints", &_trackPoints, "trackPoints/I");
-  recoTree->Branch("trackPEs", &_trackPEs, "trackPEs/F");
+  recoTree->Branch("trackSlope", _trackSlope, Form("trackSlope[%i]/F",_numberOfSectors+1));
+  recoTree->Branch("trackIntercept", _trackIntercept, Form("trackIntercept[%i]/F",_numberOfSectors+1));
+  recoTree->Branch("trackChi2", _trackChi2, Form("trackChi2[%i]/F",_numberOfSectors+1));
+  recoTree->Branch("trackPoints", _trackPoints, Form("trackPoints[%i]/I",_numberOfSectors+1));
+  recoTree->Branch("trackPEs", _trackPEs, Form("trackPEs[%i]/F",_numberOfSectors+1));
 
   _canvas.resize(_numberOfFebs*_channelsPerFeb);
   _plot.resize(_numberOfFebs*_channelsPerFeb);
@@ -569,7 +591,7 @@ if(entry%1000==0) std::cout<<"R "<<entry<<std::endl;
       float calibrationFactor = calib.GetCalibrationFactors().at(index);
       float calibrationFactorTemperatureCorrected = calib.GetCalibrationFactorsTemperatureCorrected().at(index);
 
-      if(!isnan(_timeSinceSpill[index]))  //missing FEB/channel in raw data
+      if(!std::isnan(_timeSinceSpill[index]))  //missing FEB/channel in raw data
         reco.PeakFitter(&(_adc[index*_numberOfSamples]), _numberOfSamples, pedestal, calibrationFactor, draw);
 
       //main pulse
@@ -679,15 +701,27 @@ if(entry%1000==0) std::cout<<"R "<<entry<<std::endl;
 
 void CrvEvent::TrackFit()
 {
-  float sumX     =0;
-  float sumY     =0;
-  float sumXY    =0;
-  float sumYY    =0;
-  _trackSlope    =0;
-  _trackIntercept=0;
-  _trackPEs      =0;
-  _trackPoints   =0;
-  _trackChi2     =-1;
+  std::vector<float> sumX;
+  std::vector<float> sumY;
+  std::vector<float> sumXY;
+  std::vector<float> sumYY;
+  sumX.resize(_numberOfSectors+1);
+  sumY.resize(_numberOfSectors+1);
+  sumXY.resize(_numberOfSectors+1);
+  sumYY.resize(_numberOfSectors+1);
+
+  for(int sector=0; sector<=_numberOfSectors; ++sector)
+  {
+    sumX[sector]=0;
+    sumY[sector]=0;
+    sumXY[sector]=0;
+    sumYY[sector]=0;
+    _trackSlope[sector]=0;
+    _trackIntercept[sector]=0;
+    _trackChi2[sector]=-1;
+    _trackPoints[sector]=0;
+    _trackPEs[sector]=0;
+  }
 
   //loop through the channel map
   for(ChannelMapType::iterator channelIter=_channelMap.begin(); channelIter!=_channelMap.end(); ++channelIter)
@@ -695,9 +729,10 @@ void CrvEvent::TrackFit()
     int feb=channelIter->first.first;
     int channel1=channelIter->first.second.first;
     int channel2=channelIter->first.second.second;
-//    float side=channelIter->second.first;
-    float x=channelIter->second.second.first;
-    float y=channelIter->second.second.second;
+    int sector=channelIter->second._sector;
+    int ignoreForFit=channelIter->second._ignoreForFit;
+    float x=channelIter->second._x;
+    float y=channelIter->second._y;
 
     if(feb<0 || feb>=_numberOfFebs) continue;  //feb not in event tree
     if(channel1<0 || channel2<0 || channel1>=_channelsPerFeb || channel2>=_channelsPerFeb) continue;  //channels not in event tree
@@ -715,51 +750,71 @@ void CrvEvent::TrackFit()
     float PE  = PE1+PE2;
     if(PE<_PEcut) continue;
 
-    sumX +=x*PE;
-    sumY +=y*PE;
-    sumXY+=x*y*PE;
-    sumYY+=y*y*PE;
-    _trackPEs+=PE;
-    ++_trackPoints;
+    if(ignoreForFit==0)
+    {
+      sumX[0] +=x*PE;
+      sumY[0] +=y*PE;
+      sumXY[0]+=x*y*PE;
+      sumYY[0]+=y*y*PE;
+      _trackPEs[0]+=PE;
+      ++_trackPoints[0];
+    }
+
+    if(sector!=0)
+    {
+      sumX[sector] +=x*PE;
+      sumY[sector] +=y*PE;
+      sumXY[sector]+=x*y*PE;
+      sumYY[sector]+=y*y*PE;
+      _trackPEs[sector]+=PE;
+      ++_trackPoints[sector];
+    }
   }
 
 //do the fit
-  if(_trackPEs>=2*_PEcut && _trackPoints>1)
+  for(int sector=0; sector<=_numberOfSectors; ++sector)
   {
-    if(_trackPEs*sumYY-sumY*sumY!=0)
+    if(_trackPEs[sector]>=2*_PEcut && _trackPoints[sector]>1)
     {
-      _trackSlope=(_trackPEs*sumXY-sumX*sumY)/(_trackPEs*sumYY-sumY*sumY);
-      _trackIntercept=(sumX-_trackSlope*sumY)/_trackPEs;
-
-      //find chi2
-      _trackChi2=0;
-      for(ChannelMapType::iterator channelIter=_channelMap.begin(); channelIter!=_channelMap.end(); ++channelIter)
+      if(_trackPEs[sector]*sumYY[sector]-sumY[sector]*sumY[sector]!=0)
       {
-        int feb=channelIter->first.first;
-        int channel1=channelIter->first.second.first;
-        int channel2=channelIter->first.second.second;
-//        float side=channelIter->second.first;
-        float x=channelIter->second.second.first;
-        float y=channelIter->second.second.second;
+        _trackSlope[sector]=(_trackPEs[sector]*sumXY[sector]-sumX[sector]*sumY[sector])/(_trackPEs[sector]*sumYY[sector]-sumY[sector]*sumY[sector]);
+        _trackIntercept[sector]=(sumX[sector]-_trackSlope[sector]*sumY[sector])/_trackPEs[sector];
 
-        if(feb<0 || feb>=_numberOfFebs) continue;  //feb not in event tree
-        if(channel1<0 || channel2<0 || channel1>=_channelsPerFeb || channel2>=_channelsPerFeb) continue;  //channels not in event tree
+        //find chi2
+        _trackChi2[sector]=0;
+        for(ChannelMapType::iterator channelIter=_channelMap.begin(); channelIter!=_channelMap.end(); ++channelIter)
+        {
+          int feb=channelIter->first.first;
+          int channel1=channelIter->first.second.first;
+          int channel2=channelIter->first.second.second;
+          int thisSector=channelIter->second._sector;
+          int ignoreForFit=channelIter->second._ignoreForFit;
+          if(sector!=thisSector && sector!=0) continue;
+          if(sector==0 && ignoreForFit!=0) continue;
 
-        int index1=feb*_channelsPerFeb+channel1;  //used for _variable[i][j]
-        int index2=feb*_channelsPerFeb+channel2;  //used for _variable[i][j]
+          float x=channelIter->second._x;
+          float y=channelIter->second._y;
 
-        float PE1     = _PEsTemperatureCorrected[index1];
-        float PE2     = _PEsTemperatureCorrected[index2];
-        if(PE1<=0 || _fitStatus[index1]==0) PE1=0;
-        if(PE2<=0 || _fitStatus[index2]==0) PE2=0;
+          if(feb<0 || feb>=_numberOfFebs) continue;  //feb not in event tree
+          if(channel1<0 || channel2<0 || channel1>=_channelsPerFeb || channel2>=_channelsPerFeb) continue;  //channels not in event tree
 
-        float PE  = PE1+PE2;
-        if(PE<_PEcut) continue;
+          int index1=feb*_channelsPerFeb+channel1;  //used for _variable[i][j]
+          int index2=feb*_channelsPerFeb+channel2;  //used for _variable[i][j]
 
-        float xFit = _trackSlope*y + _trackIntercept;
-        _trackChi2+=(xFit-x)*(xFit-x)*PE;  //PE-weighted chi2
+          float PE1     = _PEsTemperatureCorrected[index1];
+          float PE2     = _PEsTemperatureCorrected[index2];
+          if(PE1<=0 || _fitStatus[index1]==0) PE1=0;
+          if(PE2<=0 || _fitStatus[index2]==0) PE2=0;
+
+          float PE  = PE1+PE2;
+          if(PE<_PEcut) continue;
+
+          float xFit = _trackSlope[sector]*y + _trackIntercept[sector];
+          _trackChi2[sector]+=(xFit-x)*(xFit-x)*PE;  //PE-weighted chi2
+        }
+        _trackChi2[sector]/=(COUNTER_WIDTH*COUNTER_WIDTH/12.0)*(_trackPEs[sector]/_trackPoints[sector]);
       }
-      _trackChi2/=_trackPEs;
     }
   }
 }
@@ -771,20 +826,31 @@ void CrvEvent::ReadChannelMap(const std::string &channelMapFile)
 
   std::string header;
   getline(file,header);
+  bool hasSectors=false;
+  if(header.find("sector")!=std::string::npos) hasSectors=true;
+  bool hasIgnoreForFit=false;
+  if(header.find("ignoreForFit")!=std::string::npos) hasIgnoreForFit=true;
 
   int febA, channelA1, channelA2;
   int febB, channelB1, channelB2;
   float x, y;
+  int sector=0;
+  int ignoreForFit=0;
+  _numberOfSectors=0;
 
   while(file >> febA >> channelA1 >> channelA2 >> febB >> channelB1 >> channelB2 >> x >> y)
   {
+    if(hasSectors) file >> sector;
+    if(sector>_numberOfSectors) _numberOfSectors=sector;
+    if(hasIgnoreForFit) file >> ignoreForFit;
+
     std::pair<int,int> channelPairA(channelA1,channelA2);
     std::pair<int,int> channelPairB(channelB1,channelB2);
     std::pair<int,std::pair<int,int> > counterA(febA,channelPairA);
     std::pair<int,std::pair<int,int> > counterB(febB,channelPairB);
     std::pair<float,float> counterPos(x,y);
-    _channelMap[counterA]=std::pair<int, std::pair<float,float> >(0,counterPos);
-    _channelMap[counterB]=std::pair<int, std::pair<float,float> >(1,counterPos);
+    _channelMap[counterA]=ChannelStruct(0,sector,x,y,ignoreForFit);
+    _channelMap[counterB]=ChannelStruct(1,sector,x,y,ignoreForFit);
   }
 
   file.close();
@@ -843,7 +909,7 @@ double LandauGaussFunction(double *x, double *par)
 
     return (par[2] * step * sum * invsq2pi / par[3]);
 }
-void LandauGauss(TH1F &h, float &mpv, float &fwhm, float &signals, float &chi2)
+void LandauGauss(TH1F &h, float &mpv, float &fwhm, float &signals, float &chi2, float &error)
 {
     std::multimap<float,float> bins;  //binContent,binCenter
     for(int i=8; i<=h.GetNbinsX(); i++) bins.emplace(h.GetBinContent(i),h.GetBinCenter(i));  //ordered from smallest to largest bin entries
@@ -885,14 +951,17 @@ void LandauGauss(TH1F &h, float &mpv, float &fwhm, float &signals, float &chi2)
     TFitResultPtr fr = h.Fit(&fit,"LQRS");
     fit.Draw("same");
 
-    mpv = fit.GetMaximumX();
+    mpv = fit.GetMaximumX();  //fit.GetParameter(1) does not give the correct result, probably because it is not a pure Landau function
     chi2 = (fr->Ndf()>0?fr->Chi2()/fr->Ndf():NAN);
     if(mpv==fitRangeStart) {mpv=0; return;}
     float halfMaximum = fit.Eval(mpv)/2.0;
     float leftX = fit.GetX(halfMaximum,0.0,mpv);
     float rightX = fit.GetX(halfMaximum,mpv,10.0*mpv);
     fwhm = rightX-leftX;
-    signals = fit.Integral(0,150);
+    signals = fit.Integral(0,150,1e-3)/h.GetBinWidth(1);  //need to divide by bin width.
+                                                     //if the bin width is 2 and one has e.g. 20 events for 50PEs and 20 events for 51PEs,
+                                                     //the combined bin of x=50/51 gets 40 entries and the integral assumes that there are 40 entries for x=50 and x=51.
+    error = fit.GetParError(1);
 }
 double PoissonFunction(double *x, double *par)
 {
@@ -906,7 +975,7 @@ double PoissonFunction(double *x, double *par)
     const double scaledX=x[0]*par[2];
     return par[0]*TMath::Exp(scaledX * log(par[1]) - TMath::LnGamma(scaledX + 1.) - par[1]);
 }
-void Poisson(TH1F &h, float &mpv, float &fwhm, float &signals, float &chi2)
+void Poisson(TH1F &h, float &mpv, float &fwhm, float &signals, float &chi2, float &error)
 {
     float maxX=0;
     float maxValue=0;
@@ -936,7 +1005,9 @@ void Poisson(TH1F &h, float &mpv, float &fwhm, float &signals, float &chi2)
     float leftX = fit.GetX(halfMaximum,0.0,mpv);
     float rightX = fit.GetX(halfMaximum,mpv,10.0*mpv);
     fwhm = rightX-leftX;
-    signals = fit.Integral(0,150);
+    signals = fit.Integral(0,150,1e-3)/h.GetBinWidth(1); //explanation see Landau-Gauss
+    error = fit.GetParError(1);
+    if(fit.GetParameter(2)!=0) error/=fit.GetParameter(2);
 }
 
 void BoardRegisters(TTree *treeSpills, std::ofstream &txtFile, const int numberOfFebs, int *febID, int &nSpillsActual, int *nFebSpillsActual,
@@ -1065,7 +1136,8 @@ void BoardRegisters(TTree *treeSpills, std::ofstream &txtFile, const int numberO
 }
 
 void StorePEyields(const std::string &runNumber, const std::string &txtFileName, const int numberOfFebs, const int channelsPerFeb,
-                   const std::vector<float> mpvs[2], const std::vector<float> fwhms[2], const std::vector<float> signals[2], const std::vector<float> chi2s[2],
+                   const std::vector<float> mpvs[2], const std::vector<float> fwhms[2], const std::vector<float> signals[2],
+                   const std::vector<float> chi2s[2], const std::vector<float> errors[2],
                    const std::vector<float> &meanTemperatures, const std::vector<float> &stddevTemperatures, const std::vector<float> &maxedOutFraction,
                    TTree *treeSpills, int nEventsActual, const Calibration &calib, const TemperatureCorrections &tc)
 {
@@ -1089,6 +1161,8 @@ void StorePEyields(const std::string &runNumber, const std::string &txtFileName,
   float *signalsTSummary = const_cast<float*>(signals[1].data());
   float *chi2sSummary = const_cast<float*>(chi2s[0].data());
   float *chi2sTSummary = const_cast<float*>(chi2s[1].data());
+  float *errorsSummary = const_cast<float*>(errors[0].data());
+  float *errorsTSummary = const_cast<float*>(errors[1].data());
   float *meanTemperaturesSummary = const_cast<float*>(meanTemperatures.data());
   float *stddevTemperaturesSummary = const_cast<float*>(stddevTemperatures.data());
   float *maxedOutFractionSummary = const_cast<float*>(maxedOutFraction.data());
@@ -1119,6 +1193,8 @@ void StorePEyields(const std::string &runNumber, const std::string &txtFileName,
   recoTreeSummary->Branch("signalsTemperatureCorrected", signalsTSummary, Form("signalsTemperatureCorrected[%i][%i]/F",numberOfFebs,channelsPerFeb));
   recoTreeSummary->Branch("chi2s", chi2sSummary, Form("chi2s[%i][%i]/F",numberOfFebs,channelsPerFeb));
   recoTreeSummary->Branch("chi2sTemperatureCorrected", chi2sTSummary, Form("chi2sTemperatureCorrected[%i][%i]/F",numberOfFebs,channelsPerFeb));
+  recoTreeSummary->Branch("errors", errorsSummary, Form("errors[%i][%i]/F",numberOfFebs,channelsPerFeb));
+  recoTreeSummary->Branch("errorsTemperatureCorrected", errorsTSummary, Form("errorsTemperatureCorrected[%i][%i]/F",numberOfFebs,channelsPerFeb));
   recoTreeSummary->Branch("meanTemperatures", meanTemperaturesSummary, Form("meanTemperatures[%i][%i]/F",numberOfFebs,channelsPerFeb));
   recoTreeSummary->Branch("stddevTemperatures", stddevTemperaturesSummary, Form("stddevTemperatures[%i][%i]/F",numberOfFebs,channelsPerFeb));
   recoTreeSummary->Branch("maxedOutFraction", maxedOutFractionSummary, Form("maxedOutFraction[%i][%i]/F",numberOfFebs,channelsPerFeb));
@@ -1407,8 +1483,133 @@ void Summarize(const std::string &pdfFileName, const std::string &txtFileName, c
   std::cout<<"Mean far side    "<<std::setw(8)<<meanFar[0]<<"  "<<std::setw(8)<<meanFar[1]<<std::endl;
 }
 
+void fillDqmFile(const std::string &dqmFileName, TTree *treeMetaData, TTree *recoTree, TTree *recoTreeSpill, TTree *recoTreeSummary)
+{
+  int         run;
+  int         subrun;
+  std::string *configuration = new std::string;
+  treeMetaData->SetBranchAddress("runNumber", &run);
+  treeMetaData->SetBranchAddress("subrunNumber", &subrun);
+  treeMetaData->SetBranchAddress("configuration", &configuration);
+  treeMetaData->GetEntry(0); //only one entry per file
+
+  int       nEventsExpected;
+  int       nEventsActual;
+  Long64_t  timestampTmp=0;  //time_t
+  recoTreeSpill->SetBranchAddress("spill_nevents", &nEventsExpected);
+  recoTreeSpill->SetBranchAddress("spill_neventsActual", &nEventsActual);
+  recoTreeSpill->SetBranchAddress("spill_timestamp", &timestampTmp);
+
+  long totalEventsExpected=0;
+  long totalEventsActual=0;
+  Long64_t firstTimestamp=0;
+  Long64_t lastTimestamp=0;
+  for(int i=0; i<recoTreeSpill->GetEntries(); ++i)
+  {
+    recoTreeSpill->GetEntry(i);
+    if(firstTimestamp==0) firstTimestamp=timestampTmp;  //the first spill may not have a time stamp
+    if(timestampTmp!=0) lastTimestamp=timestampTmp;  //the last spill may not have a time stamp
+
+    totalEventsExpected+=nEventsExpected;
+    totalEventsActual+=nEventsActual;
+  }
+
+  //dqm data in config file
+  std::ifstream configFile;
+  configFile.open("config.txt");
+  if(!configFile.is_open()) {std::cerr<<"Could not open config.txt."<<std::endl; exit(1);}
+
+  std::map<std::string,float> metaDataFValues;
+  std::map<std::string,int> metaDataIValues;
+  std::string configKey, configValue;
+  while(configFile>>configKey>>configValue)
+  {
+    if(configKey.compare(0,9,"metaDataF")==0) metaDataFValues[configKey.substr(10)]=atof(configValue.c_str());
+    if(configKey.compare(0,9,"metaDataI")==0) metaDataIValues[configKey.substr(10)]=atoi(configValue.c_str());
+  }
+  configFile.close();
+
+  TFile dqmFile(dqmFileName.c_str(), "RECREATE");
+
+  //meta data in dqm file
+  TTree dqmTreeMetaData("metaData","metaData");
+  dqmTreeMetaData.Branch("runNumber", &run);
+  dqmTreeMetaData.Branch("subrunNumber", &subrun);
+  dqmTreeMetaData.Branch("configuration", configuration);
+  dqmTreeMetaData.Branch("firstSpillTime", &firstTimestamp);
+  dqmTreeMetaData.Branch("lastSpillTime", &lastTimestamp);
+  dqmTreeMetaData.Branch("eventsExpected", &totalEventsExpected);
+  dqmTreeMetaData.Branch("eventsActual", &totalEventsActual);
+  for(auto i=metaDataFValues.begin(); i!=metaDataFValues.end(); ++i)
+  {
+    dqmTreeMetaData.Branch(i->first.c_str(), &i->second);
+  }
+  for(auto i=metaDataIValues.begin(); i!=metaDataIValues.end(); ++i)
+  {
+    dqmTreeMetaData.Branch(i->first.c_str(), &i->second);
+  }
+
+  TH1F *hdqmPEs = new TH1F("PEs","PEs;PE yield [PEs];count",150,0,150);
+  TH1F *hdqmPEsTemperatureCorrected = new TH1F("PEsTemperatureCorrected","PEsTemperatureCorrected;PE yield [PEs];count",150,0,150);
+  TH1F *hdqmTime = new TH1F("time","time;time [ns];count",100,700,1700);
+  TH1F *hdqmMpvPEs = new TH1F("mpvPEs","mpvPEs;PE yield [PEs];count",150,0,150);
+  TH1F *hdqmMpvPEsTemperatureCorrected = new TH1F("mpvPEsTemperatureCorrected","mpvPEsTemperatureCorrected;PE yield [PEs];count",150,0,150);
+  TH1F *hdqmPedestals = new TH1F("pedestals","pedestals;pedestal [ADC];count",100,-50,50);
+  TH1F *hdqmCalibConstants = new TH1F("calibConstants","calibConstants;calib const [ADC*ns/PEs];count",100,200,700);
+  TH1F *hdqmCalibConstantsTemperatureCorrected = new TH1F("calibConstantsTemperatureCorrected","calibConstantsTemperatureCorrected;calib const [ADC*ns/PEs];count",100,200,700);
+  TH1F *hdqmMaxedOutFraction = new TH1F("maxedOutFraction","maxedOutFraction;fraction;count",100,0,0.01);
+  TH1F *hdqmNoiseRate = new TH1F("noiseRate","noiseRate;rate [MHz];count",100,0,0.4);
+  TH1F *hdqmXtalkProbability = new TH1F("xtalkProbability","xtalkProbability;probability;count",100,0,0.2);
+  TH1F *hdqmMeanTemperatures = new TH1F("meanTemperatures","meanTemperatures;temp [deg C];count",40,0,40);
+  TH1F *hdqmFebTemperaturesAvg = new TH1F("febTemperaturesAvg","febTemperaturesAvg;temp [deg C];count",60,10,70);
+  TH1F *hdqmBiasVoltagesAvg = new TH1F("biasVoltagesAvg","biasVoltagesAvg;bias [V];count",100,50,60);
+  TH1I *hdqmFebID = new TH1I("febID","febID;febID;count",100,0,100);
+  recoTree->Draw("PEs>>+PEs");
+  recoTree->Draw("PEsTemperatureCorrected>>+PEsTemperatureCorrected");
+  recoTree->Draw("time>>+time");
+
+  //fit time peak
+  int maxBin=hdqmTime->GetMaximumBin();
+  float maxTime=hdqmTime->GetBinCenter(maxBin);
+  hdqmTime->Fit("gaus","S","",maxTime-100.0,maxTime+100.0);
+
+  recoTreeSummary->Draw("PEs>>+mpvPEs");
+  recoTreeSummary->Draw("PEsTemperatureCorrected>>+mpvPEsTemperatureCorrected");
+  recoTreeSummary->Draw("pedestals>>+pedestals");
+  recoTreeSummary->Draw("calibConstants>>+calibConstants");
+  recoTreeSummary->Draw("calibConstantsTemperatureCorrected>>+calibConstantsTemperatureCorrected");
+  recoTreeSummary->Draw("maxedOutFraction>>+maxedOutFraction");
+  recoTreeSummary->Draw("noiseRate>>+noiseRate");
+  recoTreeSummary->Draw("xtalkProbability>>+xtalkProbability");
+  recoTreeSummary->Draw("meanTemperatures>>+meanTemperatures");
+  recoTreeSummary->Draw("febTemperaturesAvg>>+febTemperaturesAvg");
+  recoTreeSummary->Draw("biasVoltagesAvg>>+biasVoltagesAvg");
+  recoTreeSummary->Draw("febID>>+febID");
+  hdqmPEs->Write();
+  hdqmPEsTemperatureCorrected->Write();
+  hdqmTime->Write();
+  hdqmMpvPEs->Write();
+  hdqmMpvPEsTemperatureCorrected->Write();
+  hdqmPedestals->Write();
+  hdqmCalibConstants->Write();
+  hdqmCalibConstantsTemperatureCorrected->Write();
+  hdqmMaxedOutFraction->Write();
+  hdqmNoiseRate->Write();
+  hdqmXtalkProbability->Write();
+  hdqmMeanTemperatures->Write();
+  hdqmFebTemperaturesAvg->Write();
+  hdqmBiasVoltagesAvg->Write();
+  hdqmFebID->Write();
+
+  dqmTreeMetaData.Fill();
+  dqmTreeMetaData.Write();
+
+  dqmFile.Close();
+}
+
 void process(const std::string &runNumber, const std::string &inFileName, const std::string &calibFileName, const std::string &recoFileName, const std::string &recoFileName2,
-             const std::string &pdfFileName, const std::string &txtFileName, bool usePoisson, const TemperatureCorrections &tc, const std::string &channelMapFile, float PEcut)
+             const std::string &pdfFileName, const std::string &txtFileName, const std::string &dqmFileName,
+             bool usePoisson, const TemperatureCorrections &tc, const std::string &channelMapFile, float PEcut)
 {
   TFile file(inFileName.c_str(), "READ");
   if(!file.IsOpen()) {std::cerr<<"Could not read CRV file for run "<<runNumber<<std::endl; exit(1);}
@@ -1436,8 +1637,7 @@ void process(const std::string &runNumber, const std::string &inFileName, const 
   treeSpills->GetEntry(0);  //to read the numberOfFebs, channelsPerFeb, and numberOfSamples
 
   Calibration calib(calibFileName, numberOfFebs, channelsPerFeb);
-  CrvEvent event(runNumber, numberOfFebs, channelsPerFeb, numberOfSamples, tree, recoTree, tc, PEcut);
-  if(channelMapFile!="") event.ReadChannelMap(channelMapFile);
+  CrvEvent event(runNumber, numberOfFebs, channelsPerFeb, numberOfSamples, tree, recoTree, tc, PEcut, channelMapFile);
 
   int nEvents = tree->GetEntries();
 //std::cout<<"USING A WRONG NUMBER OF EVENTS"<<std::endl;
@@ -1453,6 +1653,7 @@ void process(const std::string &runNumber, const std::string &inFileName, const 
   std::vector<float> fwhms[2];
   std::vector<float> signals[2];
   std::vector<float> chi2s[2];
+  std::vector<float> errors[2];
   std::vector<float> meanTemperatures;
   std::vector<float> stddevTemperatures;
   std::vector<float> maxedOutFraction;
@@ -1474,12 +1675,14 @@ void process(const std::string &runNumber, const std::string &inFileName, const 
         float fwhm=0;
         float nsignals=0;
         float chi2=0;
-        if(!usePoisson) LandauGauss(*h[i], mpv, fwhm, nsignals, chi2);
-        else Poisson(*h[i], mpv, fwhm, nsignals, chi2);
+        float error=0;
+        if(!usePoisson) LandauGauss(*h[i], mpv, fwhm, nsignals, chi2, error);
+        else Poisson(*h[i], mpv, fwhm, nsignals, chi2, error);
         mpvs[i].push_back(mpv);
         fwhms[i].push_back(fwhm);
         signals[i].push_back(nsignals);
         chi2s[i].push_back(chi2);
+        errors[i].push_back(error);
         if(!usePoisson) h[i]->GetXaxis()->SetRangeUser(10,150);
         h[i]->Draw();
         TDirectory *tempDirectory = gDirectory;
@@ -1538,7 +1741,7 @@ void process(const std::string &runNumber, const std::string &inFileName, const 
     }
   }
 
-  StorePEyields(runNumber, txtFileName, numberOfFebs, channelsPerFeb, mpvs, fwhms, signals, chi2s, meanTemperatures, stddevTemperatures, maxedOutFraction, treeSpills, nEvents, calib, tc);
+  StorePEyields(runNumber, txtFileName, numberOfFebs, channelsPerFeb, mpvs, fwhms, signals, chi2s, errors, meanTemperatures, stddevTemperatures, maxedOutFraction, treeSpills, nEvents, calib, tc);
 
   Summarize(pdfFileName, txtFileName, numberOfFebs, channelsPerFeb, mpvs, fwhms, tc);
 
@@ -1572,12 +1775,16 @@ void process(const std::string &runNumber, const std::string &inFileName, const 
     delete hist;
   }
 
+  //meta data
+  TTree *treeMetaData = (TTree*)file.Get("metaData");
+  fillDqmFile(dqmFileName, treeMetaData, recoTree, recoTreeSpill, recoTreeSummary);
+
   recoFile.Close();
   recoFile2.Close();
   file.Close();
 }
 
-void makeFileNames(const std::string &runNumber, std::string &inFileName, std::string &calibFileName, std::string &recoFileName, std::string &recoFileName2, std::string &pdfFileName, std::string &txtFileName)
+void makeFileNames(const std::string &runNumber, std::string &inFileName, std::string &calibFileName, std::string &recoFileName, std::string &recoFileName2, std::string &pdfFileName, std::string &txtFileName, std::string &dqmFileName)
 {
   std::ifstream dirFile;
   dirFile.open("config.txt");
@@ -1609,6 +1816,7 @@ void makeFileNames(const std::string &runNumber, std::string &inFileName, std::s
     recoFileName2 = recoDirName+"crv.reco2."+dirEntry.path().stem().string().substr(s0.length())+".root";
     pdfFileName = recoDirName+"log.crv.reco."+dirEntry.path().stem().string().substr(s0.length())+".pdf";
     txtFileName = recoDirName+"log.crv.reco."+dirEntry.path().stem().string().substr(s0.length())+".txt";
+    dqmFileName = recoDirName+"crv.dqm."+dirEntry.path().stem().string().substr(s0.length())+".root";
     break;
   }
 
@@ -1630,6 +1838,7 @@ void makeFileNames(const std::string &runNumber, std::string &inFileName, std::s
       recoFileName2 = recoDirName+"rec2.mu2e."+dirEntry.path().stem().string().substr(s0.length())+".root";
       pdfFileName = recoDirName+"rec.mu2e."+dirEntry.path().stem().string().substr(s0.length())+".pdf";
       txtFileName = recoDirName+"rec.mu2e."+dirEntry.path().stem().string().substr(s0.length())+".txt";
+      dqmFileName = recoDirName+"dqm.mu2e."+dirEntry.path().stem().string().substr(s0.length())+".root";
       break;
     }
   }
@@ -1704,9 +1913,10 @@ int main(int argc, char **argv)
   std::string recoFileName2;
   std::string pdfFileName;
   std::string txtFileName;
-  makeFileNames(runNumber, inFileName, calibFileName, recoFileName, recoFileName2, pdfFileName, txtFileName);
+  std::string dqmFileName;
+  makeFileNames(runNumber, inFileName, calibFileName, recoFileName, recoFileName2, pdfFileName, txtFileName, dqmFileName);
 
-  process(runNumber, inFileName, calibFileName, recoFileName, recoFileName2, pdfFileName, txtFileName, usePoisson, tc, channelMapFile, PEcut);
+  process(runNumber, inFileName, calibFileName, recoFileName, recoFileName2, pdfFileName, txtFileName, dqmFileName, usePoisson, tc, channelMapFile, PEcut);
 
   return 0;
 }
